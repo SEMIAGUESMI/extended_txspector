@@ -1,0 +1,197 @@
+// BSD 3-Clause License
+//
+// Copyright (c) 2020, The Ohio State Univerisity. All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//
+// * Redistributions of source code must retain the above copyright notice, this
+//   list of conditions and the following disclaimer.
+//
+// * Redistributions in binary form must reproduce the above copyright notice,
+//   this list of conditions and the following disclaimer in the documentation
+//   and/or other materials provided with the distribution.
+//
+// * Neither the name of the copyright holder nor the names of its
+//   contributors may be used to endorse or promote products derived from
+//   this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// Note: Cross-Function Reentrancy Detection
+// This rule detects reentrancy vulnerabilities where:
+// 1. Function A reads state via SLOAD
+// 2. Function A makes an external call
+// 3. The external call re-enters the contract via Function B
+// 4. Function B modifies the same state variable that Function A read (via SSTORE)
+// 5. The modification in Function B affects the logic flow in Function A
+
+#include "types.dl"
+#include "opcode.dl"
+
+// Dependency relationship between variables
+.decl depends(x:Variable, y:Variable)
+depends(x, x) :-
+  use(x, _, _, _, _, _).
+
+depends(x, x) :-
+  def(x, _, _, _, _).
+
+depends(x, y) :-
+  def(x, stmt, _, x_cd, x_cn),
+  use(y, stmt, _, _, x_cd, x_cn).
+
+depends(x, z) :-
+  depends(x, y),
+  depends(y, z).
+
+// Extract function selector from CALLDATALOAD(0)
+// The selector is the first 4 bytes of calldata (located at offset 0)
+.decl FunctionSelector(cn:number, depth:number, loc:number, selector:Variable)
+FunctionSelector(cn, depth, loc, selector) :-
+  op_CALLDATALOAD(_, index_var, selector, loc, depth, cn),
+  value(index_var, "0x0").
+
+// Alternative: Identify "functions" by call context (depth + call number)
+// when explicit selectors are not available
+.decl FunctionContext(cn:number, depth:number)
+FunctionContext(cn, depth) :-
+  op_SLOAD(_, _, _, _, depth, cn);
+  op_SSTORE(_, _, _, _, depth, cn).
+
+// Collect all call-related opcodes that can trigger reentrancy
+.decl CallOperator(target_val:Value, call_loc:number, call_cd:number, call_cn:number)
+CallOperator(target_val, call_loc, call_cd, call_cn) :-
+  (op_CALL(_, _, target_var, _, _, _, _, _, _, call_loc, call_cd, call_cn);
+   op_STATICCALL(_, _, target_var, _, _, _, _, _, _, call_loc, call_cd, call_cn);
+   op_DELEGATE(_, _, target_var, _, _, _, _, _, _, call_loc, call_cd, call_cn);
+   op_CALLCODE(_, _, target_var, _, _, _, _, _, _, call_loc, call_cd, call_cn)),
+  value(target_var, target_val).
+
+// Pattern for Function A (outer function):
+// - Has a function selector (selA)
+// - Reads state via SLOAD (sload)
+// - Uses the loaded value in a conditional jump (JUMPI)
+// - Makes an external call after the SLOAD
+.decl FunctionAPattern(
+  cnA:number, depthA:number, selA:Variable,
+  sload_addr_var:Variable, sload_val:Variable, sload_loc:number,
+  jumpi_cond:Variable, jumpi_loc:number,
+  call_loc:number
+)
+FunctionAPattern(cnA, depthA, selA, sload_addr_var, sload_val, sload_loc, jumpi_cond, jumpi_loc, call_loc) :-
+  // Function A selector
+  FunctionSelector(cnA, depthA, sel_loc, selA),
+  
+  // SLOAD in Function A - reads state
+  op_SLOAD(_, sload_addr_var, sload_val, sload_loc, depthA, cnA),
+  
+  // JUMPI in Function A that depends on the SLOAD value
+  op_JUMPI(_, _, jumpi_cond, jumpi_loc, depthA, cnA),
+  depends(jumpi_cond, sload_val),
+  
+  // External call in Function A (after SLOAD)
+  CallOperator(_, call_loc, depthA, cnA),
+  
+  // Ordering: selector < SLOAD < JUMPI < CALL (within same function)
+  sel_loc < sload_loc,
+  sload_loc < jumpi_loc,
+  jumpi_loc < call_loc.
+
+// Pattern for Function B (inner/reentered function):
+// - Has a different function selector (selB != selA)
+// - Modifies state via SSTORE
+// - Called after Function A's external call (checked in main rule)
+.decl FunctionBPattern(
+  cnB:number, depthB:number, selB:Variable,
+  sstore_addr_var:Variable, sstore_loc:number
+)
+FunctionBPattern(cnB, depthB, selB, sstore_addr_var, sstore_loc) :-
+  // Function B selector
+  FunctionSelector(cnB, depthB, sel_b_loc, selB),
+  
+  // SSTORE in Function B - modifies state
+  op_SSTORE(_, sstore_addr_var, _, sstore_loc, depthB, cnB).
+
+// Cross-Function Reentrancy Detection
+// Detects when:
+// 1. Function A reads state (SLOAD)
+// 2. Function A makes external call
+// 3. Function B (different function) is reentered
+// 4. Function B writes to the same storage slot that Function A read
+// 5. This creates a reentrancy vulnerability across functions
+.decl CrossFunctionReentrancy(
+  cnA:number, depthA:number, selA:Variable,
+  cnB:number, depthB:number, selB:Variable,
+  storage_addr:Value, sload_loc:number, sstore_loc:number,
+  jumpi_loc:number, call_loc:number
+)
+.output CrossFunctionReentrancy
+
+CrossFunctionReentrancy(cnA, depthA, selA, cnB, depthB, selB, storage_addr, sload_loc, sstore_loc, jumpi_loc, call_loc) :-
+  // Function A pattern: reads state and makes external call
+  FunctionAPattern(cnA, depthA, selA, sload_addr_var, sload_val, sload_loc, jumpi_cond, jumpi_loc, call_loc),
+  
+  // Function B pattern: modifies state
+  FunctionBPattern(cnB, depthB, selB, sstore_addr_var, sstore_loc),
+  
+  // Function B is called after Function A's call (reentrancy condition)
+  // Higher call number and depth indicate it's called during/after Function A's external call
+  cnB > cnA,
+  depthB > depthA,
+  
+  // Both functions access the same storage address
+  value(sload_addr_var, storage_addr),
+  value(sstore_addr_var, storage_addr),
+  
+  // Different function selectors (different functions)
+  selA != selB,
+  
+  // Temporal ordering: Function A's SLOAD happens before Function B's SSTORE
+  sload_loc < sstore_loc,
+  
+  // Function B's SSTORE happens after Function A's external call
+  sstore_loc > call_loc.
+
+// Simplified cross-function reentrancy detection (without requiring function selectors)
+// This version works with traces that don't have explicit function dispatch logic
+.decl SimplifiedCrossFunctionReentrancy(
+  cnA:number, depthA:number,
+  cnB:number, depthB:number,
+  storage_addr:Value, sload_loc:number, sstore_loc:number,
+  call_loc:number
+)
+.output SimplifiedCrossFunctionReentrancy
+
+SimplifiedCrossFunctionReentrancy(cnA, depthA, cnB, depthB, storage_addr, sload_loc, sstore_loc, call_loc) :-
+  // Function A: reads state at depth depthA
+  op_SLOAD(_, sload_addr_var, sload_val, sload_loc, depthA, cnA),
+  
+  // Function A: makes external call after SLOAD
+  CallOperator(_, call_loc, depthA, cnA),
+  sload_loc < call_loc,
+  
+  // Function B: writes to same storage at greater depth (re-entered)
+  op_SSTORE(_, sstore_addr_var, _, sstore_loc, depthB, cnB),
+  
+  // Both functions access the same storage address
+  value(sload_addr_var, storage_addr),
+  value(sstore_addr_var, storage_addr),
+  
+  // Reentrancy constraints
+  depthB > depthA,
+  cnB > cnA,
+  
+  // Temporal ordering
+  sload_loc < sstore_loc,
+  sstore_loc > call_loc.
+

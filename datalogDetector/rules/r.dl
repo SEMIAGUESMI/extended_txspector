@@ -1,0 +1,123 @@
+// Cross-function reentrancy detector (TxSpector-style)
+// Assumes you already have opcode facts + depends/use/def facts.
+
+#include "types.dl"
+#include "opcode.dl"
+
+// ------------------------
+// 1) Extract a "selector" per call frame
+// ------------------------
+//
+// Reality check: Solidity dispatcher usually does:
+//   CALLDATALOAD(0) ; SHR 0xe0
+// If your facts already store selector directly -> keep SelectorAt as CALLDATALOAD output.
+// If not, use the SHR pattern version below.
+//
+// Option A: selector is the destination of CALLDATALOAD(0)
+.decl SelectorAt(cn:number, depth:number, loc:number, sel:Variable)
+SelectorAt(cn, depth, loc, sel) :-
+  op_CALLDATALOAD(_, sel, off, loc, depth, cn),
+  value(off, 0).   // offset == 0
+
+// Option B (more accurate): selector = SHR(CALLDATALOAD(0), 0xe0)
+// Uncomment this if you have op_SHR facts and your CALLDATALOAD gives 32 bytes.
+//.decl SelectorAt(cn:number, depth:number, loc:number, sel:Variable)
+//SelectorAt(cn, depth, loc_shr, sel) :-
+//  op_CALLDATALOAD(_, tmp, off, loc_cd, depth, cn),
+//  value(off, 0),
+//  op_SHR(_, sel, tmp, sh, loc_shr, depth, cn),
+//  value(sh, 224),
+//  loc_cd < loc_shr.
+
+// ------------------------
+// 2) Outer frame pattern (A): selector_A + SLOAD feeding JUMPI
+// ------------------------
+.decl OuterPattern(cnA:number, depthA:number,
+                   selA:Variable, locSelA:number,
+                   sloadAdr:number, sloadVal:Variable, locSload:number,
+                   jumpCondA:Variable, locJumpA:number,
+                   pcSelA:number, pcSload:number, pcJumpA:number)
+
+OuterPattern(cnA, depthA, selA, locSelA, sloadAdr, sloadVal, locSload, jumpCondA, locJumpA,
+             pcSelA, pcSload, pcJumpA) :-
+
+  // selector of this call frame
+  SelectorAt(cnA, depthA, locSelA, selA),
+
+  // SLOAD in same frame
+  op_SLOAD(pcSload, sloadVal, sloadAdr, locSload, depthA, cnA),
+
+  // JUMPI in same frame
+  op_JUMPI(pcJumpA, jumpCondA, locJumpA, depthA, cnA),
+
+  // dependency: jump condition depends on the loaded value
+  depends(jumpCondA, sloadVal),
+
+  // ordering inside the same frame (optional but usually helpful)
+  locSelA < locSload,
+  locSload < locJumpA,
+
+  // Bind pcSelA too (so we can later assert pcSelA != pcSelB)
+  // If you don't have pc for CALLDATALOAD, remove these and the pc mismatch constraint.
+  op_CALLDATALOAD(pcSelA, selA, offA, locSelA, depthA, cnA),
+  value(offA, 0).
+
+// ------------------------
+// 3) Inner frame pattern (B): different selector + JUMPI check + SSTORE to same slot
+// ------------------------
+.decl InnerPattern(cnB:number, depthB:number,
+                   selB:Variable, locSelB:number,
+                   sstoreAdr:number, locSstore:number,
+                   jumpCondB:Variable, locJumpB:number,
+                   pcSelB:number, pcJumpB:number, pcSstore:number)
+
+InnerPattern(cnB, depthB, selB, locSelB, sstoreAdr, locSstore, jumpCondB, locJumpB,
+             pcSelB, pcJumpB, pcSstore) :-
+
+  SelectorAt(cnB, depthB, locSelB, selB),
+
+  op_JUMPI(pcJumpB, jumpCondB, locJumpB, depthB, cnB),
+
+  // the update
+  op_SSTORE(pcSstore, sstoreAdr, locSstore, depthB, cnB),
+
+  // ordering inside the inner frame: selector < check < update
+  locSelB < locJumpB,
+  locJumpB < locSstore,
+
+  // Bind pcSelB similarly (only if you have pc for CALLDATALOAD)
+  op_CALLDATALOAD(pcSelB, selB, offB, locSelB, depthB, cnB),
+  value(offB, 0).
+
+// ------------------------
+// 4) Cross-function reentrancy condition
+// ------------------------
+.decl CrossFunctionReentrancy(
+  cnA:number, depthA:number, selA:Variable,
+  cnB:number, depthB:number, selB:Variable,
+  sloadAdr:number, locSload:number, locSstore:number
+)
+
+.output CrossFunctionReentrancy
+
+CrossFunctionReentrancy(cnA, depthA, selA, cnB, depthB, selB, sloadAdr, locSload, locSstore) :-
+
+  OuterPattern(cnA, depthA, selA, locSelA, sloadAdr, sloadVal, locSload, jumpCondA, locJumpA,
+               pcSelA, pcSload, pcJumpA),
+
+  InnerPattern(cnB, depthB, selB, locSelB, sloadAdr, locSstore, jumpCondB, locJumpB,
+               pcSelB, pcJumpB, pcSstore),
+
+  // nesting / reentry constraints
+  depthB > depthA,
+  cnB > cnA,
+
+  // global ordering: inner SSTORE happens after outer SLOAD in the trace
+  locSstore > locSload,
+
+  // different function (different selector)
+  selA != selB,
+
+  // different callsite dispatcher PCs (your pc_A != pc_B)
+  // (If you don’t have pcSelA/pcSelB, delete this constraint.)
+  pcSelA != pcSelB.

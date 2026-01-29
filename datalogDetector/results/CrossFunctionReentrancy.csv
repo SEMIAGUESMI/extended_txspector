@@ -1,0 +1,4 @@
+FunctionA_CallNumber	FunctionA_CallDepth	FunctionA_Selector	FunctionB_CallNumber	FunctionB_CallDepth	FunctionB_Selector	StorageAddress	SLOAD_Location	SSTORE_Location	JUMPI_Location	CALL_Location
+0	1	V1	2	3	V67	0x2	29	129	42	51
+0	1	V1	2	3	V67	0x2	33	129	42	51
+0	1	V1	2	3	V67	0x1	11	122	16	51
